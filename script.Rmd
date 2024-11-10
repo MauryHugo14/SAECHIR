@@ -1,0 +1,693 @@
+---
+title: 'Projet Tuteuré : Analyse des ressources hospitalières en chirurgie'
+author: "Hugo Maury, Léo Bernardeau"
+date: "`r format (Sys.time(),'%d %B %Y')`"
+fontsize : 7pt
+documentclass: "article"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+  rmarkdown::html_document:
+    theme : journal
+toc-title: "Sommaire"
+---
+
+
+\newpage
+
+*Sources :* 
+
+* https://data.drees.solidarites-sante.gouv.fr/explore/dataset/708_bases-statistiques-sae/information/
+* Etablissement MCO
+* Département français (MCO)
+
+Les analyses ont été réalisées grâce au logiciel Rstudio version 4.0.5.
+
+\newpage
+
+```{r, include=FALSE}
+# Packages
+library(tidyverse)
+library(gtsummary)
+library(ggcorrplot)
+library(ggplot2)
+library(Kendall)
+library(forestplot)
+library(sf)
+library(geojsonio)
+library(readxl)
+library(readr)
+library(patchwork)
+```
+
+
+```{r, include=FALSE}
+# On charge les données .Rdata à l'aide de la commande load()
+data = load(file = "data/sae_CHIR_V2023.Rdata")
+# On attribut les données dans une variable
+data = sae.chir
+# On transforme la variable AN en numéric car elle est en chr par défaut
+data$AN = as.numeric(data$AN)
+
+# -- On sélectonne les finess présents de 2013 à 2022
+selec = data %>% group_by(FI) %>% mutate(Count = n()) %>% filter(Count == 10)
+data = data.frame(selec %>% filter(Count == 10))
+
+# On supprime la variable Count
+data = data %>% select(-Count)
+```
+
+# ) Evolution des ressources
+
+### - Evolution des lits depuis 2013
+```{r, echo=FALSE, warning=FALSE}
+# - Etape 1 : Mettre sur la même échelle les deux variables
+# On calcul la médiane de LIT_CHI...
+median_lit_chi = median(data$LIT_CHI, na.rm = TRUE)
+# ... puis on calcul le facteur d'échelle en divisant la médiane de LIT_CHI par la moyenne de PLA_CHI
+facteur_echelle = median_lit_chi / mean(data$PLA_CHI, na.rm = TRUE)
+
+# - Etape 2 : Affichage du graphique
+data %>%
+  filter(!is.na(PLA_CHI), !is.na(LIT_CHI)) %>%
+  select(AN, PLA_CHI, LIT_CHI) %>%
+  mutate(PLA_CHI = PLA_CHI * facteur_echelle) %>% 
+  group_by(AN) %>%
+  summarise(count_LIT = sum(LIT_CHI), count_PLA = sum(PLA_CHI)) %>%
+  ggplot() +
+  geom_line(aes(x = AN, y = count_LIT, color = "LIT_CHI"), size = 1.5) +
+  geom_line(aes(x = AN, y = count_PLA, color = "PLA_CHI"), size = 1.5) +
+  scale_color_manual(values = c("red", "green"),
+                     name = "Légende :",
+                     labels = c("Hospitalisation complète", "Hospitalisation partielle")) +
+  labs(title = "Evolution des lits entre 2013 et 2022 en France",
+       x = "Année",
+       y = "LIT_CHI") +
+  theme_minimal() +
+  scale_y_continuous(name = "Hospitalisation complète", sec.axis = sec_axis(~./100, name = "Hospitalisation partielle"))+
+  scale_x_continuous(breaks = unique(data$AN))
+```
+
+Le nombre de lits en HC tend à diminuer, au contraire du nombre de lits en HP.
+
+\newpage
+
+### - Evolution des procédures interventionnelles en imagerie
+
+```{r, echo=FALSE}
+# On sélection des variables d'intérêts
+data %>% select(BLOCS_A13, BLOCS_B13, AN) %>%  drop_na() %>% 
+  group_by(AN)  %>%  summarise(BLOCS_A13 = sum(BLOCS_A13), BLOCS_B13 = sum(BLOCS_B13))%>% 
+  # On affiche le graphique
+  ggplot()+ 
+  geom_line(aes(x = AN, y = BLOCS_A13, color = "LIT_CHI"), size = 1.5) +
+  geom_line(aes(x = AN, y = BLOCS_B13, color = "PLA_CHI"), size = 1.5) +
+  scale_color_manual(values = c("red", "green"),
+                     name = "Légende :",
+                     labels = c("Hospitalisation complète", "Hospitalisation partielle")) +
+  labs(title = "Evolution des procédures interventionnelles en imagerie de 2013 à 2022",
+       x = "Année",
+       y = "") +
+  theme_minimal() +
+  scale_x_continuous(breaks = unique(data$AN))
+```
+
+Le nombre d'interventions en HC reste augmente légèrement. Le nombre d'interventions en HP augmente exponentiellement.
+
+\newpage
+
+# ) Analyse des tendances et des corrélations des lits
+
+### - Corrélation entre les variables
+
+```{r, echo=FALSE}
+annee = c(2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+for (i in 1:10){
+  data_cor = data %>% filter(AN == annee[i]) %>% select(LIT_CHI, JLI_CHI, SEJHC_CHI, SEJ0_CHI, JOU_CHI, PLA_CHI, SEJHP_CHI, BLOCS_A13, BLOCS_B13, N2310, N2320, N2200, N2510)
+  data_cor = data_cor %>% rename("Lit HC" = LIT_CHI, "Jours avec nuitées HC" = JLI_CHI, "Séjour HC" = SEJHC_CHI,
+                                 "Séjour de 0 nuit HC" = SEJ0_CHI, "Jour HC" = JOU_CHI, "Lit HP" = PLA_CHI,
+                                 "Séjour HP" = SEJHP_CHI, "Proc. imagerie HP" = BLOCS_A13,
+                                 "Proc. imagerie HC" = BLOCS_B13, "Inf. anesthésistes" = N2310,
+                                 "Inf. bloc opératoire" = N2320, "Infirmiers" = N2200, "Inf. auxiliaire" = N2510)
+  corr = round(cor(data_cor), 1)
+  p = ggcorrplot(corr, title = paste("Corrélation pour l'année", annee[i]))
+  print(p)
+}
+
+```
+
+
+\newpage
+
+### - Tendances du nombre de lit
+En Hospitalistion complète 
+```{r, echo=FALSE, warning=FALSE}
+# Régression du nombre de lit en fonction de l'année
+tendance = glm(LIT_CHI ~ relevel(factor(AN), ref = "2013"), data = data)
+
+# On crée le tableau de la régression
+tbl_regression(tendance) %>%
+  bold_p() %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**Coef**",
+    p.value = "**p-valeur**",
+    ci = "**Intervalle de confiance**"
+  ) %>%
+  bold_labels()
+```
+Modèle : Nombre de lit ~ factor(AN) 
+
+\newpage
+
+En Hospitalisation partielle
+
+```{r, echo=FALSE, warning=FALSE}
+# Régression du nombre de lit en fonction de l'année
+tendance = glm(PLA_CHI ~ relevel(factor(AN), ref = "2013"), data = data)
+
+# On crée le tableau de la régression
+tbl_regression(tendance) %>%
+  bold_p() %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**Coef**",
+    p.value = "**p-valeur**",
+    ci = "**Intervalle de confiance**"
+  ) %>%
+  bold_labels()
+```
+Modèle : Nombre de Place ~ factor(AN)  
+
+
+\newpage
+
+# ) Analyse des tendances des séjours hospitaliers
+
+### - Pente des séjours en hospitalisation complète
+```{r, echo=FALSE, warning=FALSE}
+# On initialise une matrice pour stocker le coefficient et les intervalles de confiance
+coef_HC = matrix(nrow = 0, ncol = 3)  # 3 colonnes : coefficient, IC inférieur, IC supérieur
+annee = c(2013,2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022) # On met les années à étudier
+# On crée une base de données intermédaires
+dt_pente_HC = data 
+
+for (i in 1:9) {
+  # On filtre les données car il y a des valeurs extrêmes :
+  # - On extrait les données pour l'année i
+  a_i = data.frame(dt_pente_HC %>% filter(AN == 2013) %>% select(LIT_CHI))
+  # - On extrait les données pour l'année i + 1
+  a_i_plus = data.frame(dt_pente_HC %>% filter(AN == annee[i+1]) %>% select(LIT_CHI))
+  # Ajustement du modèle linéaire
+  mod = lm(a_i_plus[, 1] ~ a_i[, 1])
+  # On extrait les intervalles de confiance
+  conf_int = confint(mod)[2,]
+  # On extrait le coefficient du modèle (pas l'intercept)
+  coef_summary = summary(mod)$coefficients[1:2, ]
+  # On ajoute les résultats à la matrice coef_HC
+  coef_HC = rbind(coef_HC, c(coef_summary[2, 1], conf_int[1], conf_int[2]))
+}
+
+# On transforme la matrice en un tableau
+coef_HC = data.frame(coef_HC)
+# On nomme les colonnes
+colnames(coef_HC) = c("Coefficient", "Lower", "Upper")
+# On nomme les lignes 
+rownames(coef_HC) = c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+
+# On utilise la fonction foresplot() pour afficher les coefficients et leurs IC
+forestplot(rownames(coef_HC), coef_HC$Coefficient, 
+           coef_HC$Lower,
+           coef_HC$Upper,
+           zero = 1,
+           xlab = "Coef (95%)",
+           col = fpColors(box = c("red4"), 
+                          lines = c("skyblue3")),
+           xticks = seq(0.7,1.1,0.05),
+           boxsize = 0.1,
+           vertices = TRUE,
+           txt_gp = fpTxtGp(label = list(gpar(fontfamily = "",
+                                              col = "#660001", cex = .75)),
+                            ticks = gpar(fontfamily = "", cex = .5),
+                            xlab  = gpar(fontfamily = "font", cex = .9)))
+
+```
+
+### - Test de Kendall 
+
+Pour les séjours de 0 nuit :
+```{r, echo=FALSE, warning=FALSE}
+# On effectue le test de Mann-Kendall sur la série chronologique des années
+mann_kendall_test = Kendall(dt_pente_HC$AN, dt_pente_HC$SEJ0_CHI)
+
+# On affiche les résultats du test
+mann_kendall_test
+```
+
+Avec **tau** = -0.126, et une p_value inférieur à 5%, nous pouvons affirmer que le nombre de séjour en HC à diminuer entre 2013 et 2022.
+
+Pour les lits :
+```{r, echo=FALSE, warning=FALSE}
+# On effectuele test de Mann-Kendall sur la série chronologique des années
+mann_kendall_test = Kendall(dt_pente_HC$AN, dt_pente_HC$LIT_CHI)
+
+# On affiche les résultats du test
+mann_kendall_test
+```
+
+Avec **tau** = -0.112, et une p_value inférieur à 5%, nous pouvons affirmer que le nombre de lit en HC à diminuer entre 2013 et 2022.
+
+\newpage
+
+### - Pente des séjours en hospitalisation partielle
+
+```{r, echo=FALSE, warning=FALSE, error=FALSE, message=FALSE}
+# On initialise une matrice pour stocker le coefficient et les intervalles de confiance
+coef_HP = matrix(nrow = 0, ncol = 3)  # 3 colonnes : coefficient, IC inférieur, IC supérieur
+annee = c(2013,2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022) # On met les années à étudier
+# On crée une base de données intermédaires
+dt_pente_HP = data
+
+for (i in 1:9) {
+  # On filtre les données car il y a des valeurs extrêmes :
+  # - On extrait les données pour l'année i
+  a_i = data.frame(dt_pente_HP %>% filter(AN == 2013) %>% select(PLA_CHI))
+  # - On extrait les données pour l'année i + 1
+  a_i_plus = data.frame(dt_pente_HP %>% filter(AN == annee[i+1]) %>% select(PLA_CHI))
+  # Ajustement du modèle linéaire
+  mod = lm(a_i_plus[, 1] ~ a_i[, 1])
+  # On extrait les intervalles de confiance
+  conf_int = confint(mod)[2,]
+  # On extrait le coefficient du modèle (pas l'intercept)
+  coef_summary = summary(mod)$coefficients[1:2, ]
+  # On ajoute les résultats à la matrice coef_HP
+  coef_HP = rbind(coef_HP, c(coef_summary[2, 1], conf_int[1], conf_int[2]))
+}
+
+# On transforme la matrice en un tableau
+coef_HP = data.frame(coef_HP)
+# On nomme les colonnes
+colnames(coef_HP) = c("Coefficient", "Lower", "Upper")
+# On nomme les lignes 
+rownames(coef_HP) = c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+
+# On utilise la fonction foresplot() pour afficher les coefficients et leurs IC
+forestplot(rownames(coef_HP), coef_HP$Coefficient, 
+           coef_HP$Lower,
+           coef_HP$Upper,
+           zero = 1,
+           xlab = "Coef (95%)",
+           col = fpColors(box = c("red4"), 
+                          lines = c("skyblue3")),
+           xticks = seq(0.7,1.3,0.05),
+           boxsize = 0.1,
+           vertices = TRUE,
+           txt_gp = fpTxtGp(label = list(gpar(fontfamily = "",
+                                              col = "#660001", cex = .75)),
+                            ticks = gpar(fontfamily = "", cex = .5),
+                            xlab  = gpar(fontfamily = "font", cex = .9)))
+```
+
+### - Test de Kendall 
+
+Pour les séjours :
+```{r, echo=FALSE, warning=FALSE }
+# On effectue le test de Mann-Kendall sur la série chronologique des années
+mann_kendall_test = Kendall(dt_pente_HP$AN, dt_pente_HP$SEJHP_CH)
+
+# On affiche les résultats du test
+mann_kendall_test
+```
+
+Avec **tau** = 0.0919, et une p_value inférieur à 5%, nous pouvons affirmer que le nombre de séjour en HP à augmenter entre 2013 et 2022.
+
+Pour les places :
+```{r, echo=FALSE, warning=FALSE }
+# On effectue le test de Mann-Kendall sur la série chronologique des années
+mann_kendall_test = Kendall(dt_pente_HP$AN, dt_pente_HP$PLA_CHI)
+
+# On affiche les résultats du test
+mann_kendall_test
+```
+
+Avec **tau** = 0.093, et une p_value inférieur à 5%, nous pouvons affirmer que le nombre de séjour en HP à augmenter entre 2013 et 2022.
+
+
+\newpage
+
+# ) Evolution des ratios des ressources hospitalières
+
+
+### - Ratio Infimiers/Nombre de lits
+```{r, echo=FALSE}
+# On supprime les lignes avec des valeurs manquantes dans les variables d'intérêt
+data_clean_IL = na.omit(data[, c("FI", "N2200", "N2510", "LIT_CHI", "PLA_CHI", "AN")])
+
+# On calcule la somme des médecins et des lits 
+data_tot_IL = data_clean_IL %>% group_by(FI) %>% mutate(tot_inf = N2200+N2510,
+                                                        tot_lit = LIT_CHI+PLA_CHI)
+
+# On fait la régression
+tendance_IL = glm(tot_lit~tot_inf+factor(AN), data = data_tot_IL)
+
+# On affiche un tableau afin de résumé la régression
+tbl_regression(tendance_IL) %>%
+  bold_p() %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**Coef**",
+    p.value = "**p-valeur**",
+    ci = "**Intervalle de confiance**"
+  ) %>%
+  bold_labels()
+
+```
+Variable sélectionnée : N2200 + N2510 | LIT_CHI + PLA_CHI  
+Coef. : 1.7
+
+
+### - Ratio Infirmiers/Nombre de Séjour
+```{r, echo=FALSE}
+# On supprime les lignes avec des valeurs manquantes dans les variables d'intérêt
+data_clean_IS = na.omit(data[, c("FI", "SEJHP_CHI", "SEJHC_CHI", "SEJ0_CHI", "N2200", "N2510", "AN")])
+
+# On calcule la somme des séjours et des lits 
+data_tot_IS = data_clean_IS %>% group_by(FI) %>% mutate(tot_inf = N2200+N2510, 
+                                                        tot_sej = SEJHP_CHI+SEJHC_CHI+SEJ0_CHI)
+
+# On fait la régression
+tendance_IS = glm(tot_sej~tot_inf+factor(AN), data = data_tot_IS)
+
+# On affiche un tableau afin de résumé la régression
+tbl_regression(tendance_IS) %>%
+  bold_p() %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**Coef**",
+    p.value = "**p-valeur**",
+    ci = "**Intervalle de confiance**"
+  ) %>%
+  bold_labels()
+
+```
+Variable sélectionnée : N2200 + N2500 | SEJHC_CHI + SEJHP_CHI + SEJ0_CHI  
+Modèle : Séjour ~ Infirmier
+Coef. : 124
+
+\newpage
+
+### - Ratio Infirmiers/AN
+```{r, echo=FALSE}
+# On supprime les lignes avec des valeurs manquantes dans les variables d'intérêt
+data_clean_IA = na.omit(data[, c("FI", "N2200", "N2510", "AN")])
+
+# On calcule la somme des séjours et des lits 
+data_tot_IA = data_clean_IA %>% group_by(FI) %>% mutate(tot_inf = N2200+N2510)
+
+# On fait la régression
+tendance_IA = glm(tot_inf~factor(AN), data = data_tot_IA)
+
+# On affiche un tableau afin de résumé la régression
+tbl_regression(tendance_IA) %>%
+  bold_p() %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**Coef**",
+    p.value = "**p-valeur**",
+    ci = "**Intervalle de confiance**"
+  ) %>%
+  bold_labels()
+
+```
+
+\newpage 
+
+# ) Cartographie
+
+
+```{r, echo = FALSE, include=FALSE}
+#### - Importation des données sur le numéro de département
+# On importe les données 
+donnees_geo = st_read("data/contour-des-departements.geojson")
+
+# On extrait les deux premiers chiffres de chaque modalité, pour avoir le numéro de département
+data$departement= (substr(data$FI, 1, 2))
+
+# On extrait les données de 2019 du fichier pop_fr_2019 et on les insère dans le fichier data
+pop_2019 = read_excel("data/pop_fr_2019.xlsx")
+data$population = 0
+
+for (i in 1:length(data$departement)) {
+  # Trouver l'index dans pop_2019 correspondant au département
+  index_dept = which(pop_2019$CODE_DEPT == data$departement[i])
+  
+  # Vérifier si un index a été trouvé
+  if (length(index_dept) > 0) {
+    # Affecter la population correspondante à la ligne dans data
+    data$population[i] = pop_2019$POP_2019[index_dept]
+  } else {
+    # Affecter NA si aucun index n'a été trouvé
+    data$population[i] = NA
+  }
+  print(i)
+}
+
+#### - Importation des données sur les régions
+data_reg <- read.csv("data/departements-region.csv", header=TRUE, sep=",", encoding = "UTF-8")
+data$region = 0
+
+for (i in 1:length(data$region)) {
+  # Trouver l'index dans pop_2019 correspondant au département
+  index_region = which(data_reg$num_dep == data$departement[i])
+  
+  # Vérifier si un index a été trouvé
+  if (length(index_region) > 0) {
+    # Affecter la population correspondante à la ligne dans data
+    data$region[i] = data_reg$region_name[index_region]
+  } else {
+    # Affecter NA si aucun index n'a été trouvé
+    data$region[i] = NA
+  }
+  print(i)
+}
+
+```
+
+### - Hospitalisation complète
+
+```{r, echo=FALSE}
+
+# Calcul du nombre de lits pour 10000 habitants par département
+data_2019_10000_hc = data %>% 
+  filter(AN == 2019) %>% 
+  group_by(departement) %>% 
+  summarise(lit = sum(LIT_CHI), population = population) %>%
+  mutate(nb_lit_10000 = round((lit/population) * 10000, 5))
+
+
+# On fusionne les données agrégées avec les données géographiques
+france_map = merge(donnees_geo, data_2019_10000_hc, by.x = "code", by.y = "departement", all.x = TRUE)
+
+# On affiche la carte
+map_hc = ggplot() + 
+  geom_sf(data = france_map, aes(fill = nb_lit_10000), color = "black") +
+  coord_sf() + # Utilisation de coordonnées spatiales
+  scale_fill_gradientn(colors = c("white", "blue"), 
+                       name = "Nombre de lit pour 10000 habitants", 
+                       breaks = seq(0, max(france_map$nb_lit_10000),by = 5),
+                       labels = scales::comma_format()) +
+  labs(title = "Nombre de lit en hospitalisation complète par département en France en 2019")+
+  theme_minimal() + # Utilisation du thème minimal
+  theme(panel.background = element_rect(fill = "lightgray"),  # Définir un fond gris clair
+        panel.grid.major = element_blank(),  # Supprimer le quadrillage majeur
+        panel.grid.minor = element_blank(),  # Supprimer le quadrillage mineur
+        axis.text.x = element_blank(),  # Supprimer les étiquettes de l'axe X
+        axis.text.y = element_blank()); map_hc
+```
+
+\newpage 
+
+### - Hospitalisation partielle
+
+```{r, echo=FALSE}
+# Calcul du nombre de lits pour 10000 habitants par département
+data_2019_10000_hp = data %>% 
+  filter(AN == 2019) %>% 
+  group_by(departement) %>% 
+  summarise(lit = sum(PLA_CHI, na.rm = TRUE), population = population) %>%
+  mutate(nb_lit_10000 = round((lit/population) * 10000, 5))
+
+
+# On fusionne les données agrégées avec les données géographiques
+france_map = merge(donnees_geo, data_2019_10000_hp, by.x = "code", by.y = "departement", all.x = TRUE)
+
+# On affiche la carte
+map_hp = ggplot() + 
+  geom_sf(data = france_map, aes(fill = nb_lit_10000), color = "black") +
+  coord_sf() + # Utilisation de coordonnées spatiales
+  scale_fill_gradientn(colors = c("white", "blue"), 
+                       name = "Nombre de lit pour 10000 habitants", 
+                       breaks = seq(0, max(france_map$nb_lit_10000),by = 1),
+                       labels = scales::comma_format()) +
+  labs(title = "Nombre de lit en hospitalisation partielle par département en France en 2019")+
+  theme_minimal() + # Utilisation du thème minimal
+  theme(panel.background = element_rect(fill = "lightgray"),  # Définir un fond gris clair
+        panel.grid.major = element_blank(),  # Supprimer le quadrillage majeur
+        panel.grid.minor = element_blank(),  # Supprimer le quadrillage mineur
+        axis.text.x = element_blank(),  # Supprimer les étiquettes de l'axe X
+        axis.text.y = element_blank()); map_hp
+```
+
+
+```{r, echo=FALSE, include=FALSE}
+superposed_map = map_hp + map_hc + plot_layout(ncol = 2)
+
+# Affichage de la carte superposée
+print(superposed_map)
+```
+
+\newpage
+
+# ) Modèle multi-niveaux
+
+```{r, echo=FALSE, warning=FALSE, include = FALSE}
+# Analyse multivariée
+
+### BOXPLOT 
+ggplot(data, aes(AN, SEJHC_CHI, fill = factor(AN))) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2) +
+  guides(fill = "none") +
+  labs(x = "", y = "Sejour hospitalier")
+
+ggplot(data, aes(LIT_CHI, SEJHC_CHI, fill = factor(AN))) +
+  geom_boxplot() +
+  labs(x = "", y = "Nombre de lit", fill = "")
+
+### Spaghetti plot
+ggplot(data, aes(LIT_CHI, SEJHC_CHI, col = factor(AN))) +
+  geom_line() +
+  labs(x = "Lit", y = "Séjour", col = "Année") +
+  guides(col = guide_legend(nrow = 3))
+
+library(lme4)
+```
+
+### Hospitalisation complète
+
+```{r, echo=FALSE, warning=FALSE}
+library(lmerTest)
+# Calcul du nombre d'infirmier
+data$inf = data$N2200 + data$N2510
+# transformation de la variable STJR en factor
+data$STJR = as.factor(data$STJR)
+
+### Création de 3 groupes pour le nombre de séjour de 0 nuit
+# - Infirmiers
+# Calculer les quartiles en ignorant les NA
+quantile = quantile(data$inf, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+# Utiliser les quartiles pour diviser les données en 3 groupes
+groupes = cut(data$inf, breaks = quantile, labels = c("[0 ; 16.6]", "[16.7 ; 32.94]", "[32.95 ; 369.99]"), include.lowest = TRUE)
+data$inf2 = groupes
+# - SEJ0_HC
+# Calculer les quartiles en ignorant les NA
+quantile = quantile(data$SEJ0_CHI, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+# Utiliser les quartiles pour diviser les données en 3 groupes
+groupes = cut(data$SEJ0_CHI, breaks = quantile, labels = c("[0 ; 41]", "[42 ; 157]", "[158 ; 18792]"), include.lowest = TRUE)
+data$SEJ0_CHI2 = groupes
+
+# Modèle
+mod_HC = lmer(LIT_CHI ~ 1 + (SEJ0_CHI2) + (STJR) + (AN) + (inf2) + (1 | FI) + (1 | departement) + (1 | region), data = data)
+summary(mod_HC)
+```
+\newpage
+
+### Hospitalisation Partielle
+
+```{r}
+### Création de 3 groupes pour le nombre de séjour de 0 nuit
+# - Infirmiers
+# Calculer les quartiles en ignorant les NA
+quantile = quantile(data$SEJHP_CHI, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+# Utiliser les quartiles pour diviser les données en 3 groupes
+groupes = cut(data$SEJHP_CHI, breaks = quantile, labels = c("[0 ; 2532]", "[2533 ; 6024]", "[6024 ; 52975]"), include.lowest = TRUE)
+data$SEJHP_CHI2 = groupes
+
+# Modèle
+mod_HP = lmer(PLA_CHI ~ 1 + (SEJHP_CHI2) + (STJR) + (AN) + (inf2) + (1 | FI) + (1 | departement) + (1 | region), data = data)
+summary(mod_HP)
+```
+
+```{r}
+# Pour expliquer les parts de variances
+library(performance)
+icc(mod_HC, by_group = TRUE)
+icc(mod_HP, by_group = TRUE)
+```
+
+# AUTRE
+
+
+```{r, include=FALSE, echo=FALSE, warning=FALSE}
+# - Séjour en hospitalisation partielle
+data %>% select(SEJHP_CHI, AN) %>%  drop_na() %>% 
+  group_by(AN)  %>%  summarise(SEJHP_CHI = sum(SEJHP_CHI))%>% 
+  ggplot()+ 
+  geom_line(aes(x = AN, y = SEJHP_CHI, color = "SEJHP_CHI"), size = 1.5) +
+  scale_color_manual(values = c("red"),
+                     name = "Légende",
+                     labels = "") +
+  labs(title = "Evolution au fil du temps du nombre de séjour en chirurgie ambulatoire",
+       x = "Année",
+       y = "") +
+  theme_minimal() +
+  scale_x_continuous(breaks = unique(data$AN))
+```
+
+```{r,include = FALSE, echo=FALSE, warning=FALSE}
+# - Séjour en hospitalisation complète
+
+data %>% select(SEJHC_CHI, AN) %>%  drop_na() %>% 
+  group_by(AN)  %>%  summarise(SEJHC_CHI = sum(SEJHC_CHI))%>% 
+  ggplot()+ 
+  geom_line(aes(x = AN, y = SEJHC_CHI, color = "SEJHC_CHI"), size = 1.5) +
+  scale_color_manual(values = c("red"),
+                     name = "Légende",
+                     labels = "Séjour") +
+  labs(title = "Evolution au fil du temps du nombre de séjour en hospitalistion complète",
+       x = "Année",
+       y = "Nombre de séjour") +
+  theme_minimal() +
+  scale_x_continuous(breaks = unique(data$AN))
+```
+
+```{r, include = FALSE, echo=FALSE, warning=FALSE}
+# - Séjour de 0 jour en hospitalisation complète
+data %>% select(SEJ0_CHI, AN) %>%  drop_na() %>% 
+  group_by(AN)  %>%  summarise(SEJ0_CHI = sum(SEJ0_CHI))%>% 
+  ggplot()+ 
+  geom_line(aes(x = AN, y = SEJ0_CHI, color = "SEJ0_CHI"), size = 1.5) +
+  scale_color_manual(values = c("red")) +
+  labs(title = "Evolution au fil du temps du nombre de séjour de 0 jour en hospitalistion complète",
+       x = "Année",
+       y = "") +
+  theme_minimal() +
+  scale_x_continuous(breaks = unique(data$AN))
+```
+
+```{r, include=FALSE, echo=FALSE, warning=FALSE}
+# - Comparaison des années
+# Sélection des variables d'intérêts
+data_comp = data %>% select(JLI_CHI, SEJHC_CHI, SEJ0_CHI, JOU_CHI, SEJHP_CHI, N2310, N2320, N2200, N2510, AN)%>% 
+  filter(AN == c(2013, 2016, 2019, 2022))
+data_comp %>% 
+  drop_na() %>% 
+  group_by(AN) %>%
+  rename("Jour avec nuitées" = JLI_CHI, "Séjour" = SEJHC_CHI, "Séjour de 0 jour" = SEJ0_CHI, "Jour en Hos. complète" = JOU_CHI, "Séjour en chirurgie ambulatoire" = SEJHP_CHI, "Infirmiers auxiliaires anesthésistes" = N2310, 
+         "Infirmiers de bloc opératoire" = N2320, "Infirmiers" = N2200, "Infirmiers auxiliaires" = N2510) %>% 
+  #summarise(across(where(is.numeric), ~sum(., na.rm = TRUE)), .groups = 'drop') %>% 
+  tbl_summary(by=AN, statistic = all_continuous() ~ "{sum}") %>% 
+  bold_labels()
+
+```
